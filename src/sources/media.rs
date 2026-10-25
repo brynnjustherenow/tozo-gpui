@@ -1,3 +1,5 @@
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -10,8 +12,8 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use windows::core::Interface;
 use windows::Foundation::TypedEventHandler;
-use windows_future::{AsyncOperationCompletedHandler, IAsyncOperation};
-use windows::Media::Control::{    GlobalSystemMediaTransportControlsSession as Session,
+use windows::Media::Control::{
+    GlobalSystemMediaTransportControlsSession as Session,
     GlobalSystemMediaTransportControlsSessionManager as Manager,
     GlobalSystemMediaTransportControlsSessionMediaProperties,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
@@ -20,6 +22,10 @@ use windows::Media::Control::{    GlobalSystemMediaTransportControlsSession as S
 };
 use windows::Storage::Streams::{DataReader, IRandomAccessStream};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+use windows_future::{AsyncOperationCompletedHandler, IAsyncOperation};
+
+use gpui_kit::assets::IconName;
+use tozo_extra::engines::{try_resolve_path, SmtcSourceMeta};
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct MediaArtwork {
@@ -36,6 +42,8 @@ pub struct MediaInfo {
     pub artwork: Option<MediaArtwork>,
     pub position_ms: u64,
     pub end_ms: u64,
+    /// 浏览器扩展注入的来源页信息（bilibili 时 identifier 为 BV 号）
+    pub smtc_metadata: Option<SmtcSourceMeta>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,11 +120,11 @@ struct MediaWatcher {
     last: MediaInfo,
 }
 
-/// 去掉标题末尾拼接的来源标记
-fn split_source(raw: &str) -> &str {
+/// 拆掉标题/艺人末尾拼接的来源标记，返回（干净文本, 标记后的额外信息）
+fn split_source(raw: &str) -> (&str, Option<&str>) {
     match raw.split_once(SOURCE_MARK) {
-        Some((clean, _)) => clean,
-        None => raw,
+        Some((clean, extra)) => (clean, Some(extra)),
+        None => (raw, None),
     }
 }
 
@@ -262,6 +270,7 @@ fn recompute(shared: &Arc<Mutex<MediaWatcher>>, tx: &InfoTx, scope: Scope) {
                     info.artist = meta.artist;
                     info.subtitle = meta.subtitle;
                     info.artwork = meta.artwork;
+                    info.smtc_metadata = meta.smtc_metadata;
                 }
             }
             Scope::State => {
@@ -297,6 +306,7 @@ struct MediaMeta {
     artist: String,
     subtitle: String,
     artwork: Option<MediaArtwork>,
+    smtc_metadata: Option<SmtcSourceMeta>,
 }
 
 struct MediaState {
@@ -315,8 +325,18 @@ fn poll_meta(
     let props = await_op(&op)?;
     let raw_title = props.Title().unwrap_or_default().to_string();
     let raw_artist = props.Artist().unwrap_or_default().to_string();
-    let title = split_source(&raw_title).to_string();
-    let artist = split_source(&raw_artist).to_string();
+    let (title, title_extra) = split_source(&raw_title);
+    let (artist, artist_extra) = split_source(&raw_artist);
+    // 扩展把页址注入在艺人标记后，或标题的 "[via …]" 里
+    let source_url = artist_extra.map(|url| url.to_string()).or_else(|| {
+        title_extra.and_then(|extra| {
+            extra
+                .split_once("[via ")
+                .map(|(_, rest)| rest.trim_end_matches(']').to_string())
+        })
+    });
+    let smtc_metadata = source_url.as_deref().and_then(try_resolve_path);
+    let (title, artist) = (title.to_string(), artist.to_string());
     let subtitle = props.Subtitle().unwrap_or_default().to_string();
     let cached = if fresh_artwork {
         None
@@ -345,6 +365,7 @@ fn poll_meta(
         artist,
         subtitle,
         artwork,
+        smtc_metadata,
     })
 }
 
@@ -377,6 +398,7 @@ fn poll_session(shared: &Arc<Mutex<MediaWatcher>>, session: &Session) -> Option<
         subtitle: meta.subtitle,
         position_ms: state.position_ms,
         end_ms: state.end_ms,
+        smtc_metadata: meta.smtc_metadata,
     })
 }
 
@@ -463,6 +485,7 @@ pub struct MediaStore {
     dying: bool,
     phase: f64,
     artwork_img: Option<(u64, Arc<RenderImage>)>,
+    pub(crate) compact: bool,
 }
 
 /// 选岛显示文本：有副标题用副标题，否则标题加艺人
@@ -536,6 +559,7 @@ impl MediaStore {
             dying: false,
             phase: 0.0,
             artwork_img: None,
+            compact: false,
         }
     }
 
@@ -561,8 +585,10 @@ impl MediaStore {
 }
 
 impl Render for MediaStore {
-    /// 渲染媒体岛：出入场动画、频谱条、悬停跑马灯
+    /// 渲染媒体岛：出入场动画、频谱条、悬停跑马灯；
+    /// compact 分支：无点击弹窗，悬停时蒙版覆盖控件并沿底边弹出进度条
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = self.compact;
         let target = self.visible_target();
         let had_content = self.content.artwork.is_some() || !island_text(&self.content).is_empty();
         if target {
@@ -579,21 +605,44 @@ impl Render for MediaStore {
         let has_art = art_img.is_some();
         let playing = self.content.playing;
         let text = island_text(&self.content);
-        let text_target = est_text_width(&text, 12.)
-            .clamp(ISLAND_TEXT_WIDTH, ISLAND_TEXT_WIDTH_EXPANDED);
-        let text_overflow = (est_text_width(&text, 12.) - text_target).max(0.);
+        let est = est_text_width(&text, 12.);
+        let text_target = est.clamp(ISLAND_TEXT_WIDTH, ISLAND_TEXT_WIDTH_EXPANDED);
+        // compact 悬停不展开：文本窗口固定在基础宽度，跑马灯按此窗口计算溢出
+        let text_window = if compact {
+            ISLAND_TEXT_WIDTH
+        } else {
+            text_target
+        };
+        let text_overflow = (est - text_window).max(0.);
         let phase = self.phase;
         let hovering = self.hovering;
+        let progress = (self.content.end_ms > 0).then(|| {
+            let end = self.content.end_ms;
+            (
+                (self.content.position_ms as f32 / end as f32).clamp(0., 1.),
+                end,
+            )
+        });
+        // 进度条轨道的窗口坐标：canvas 每帧刷新、鼠标事件期读取（岛在 bar 内位置动态，无法静态换算）
+        let progress_track = Rc::new(Cell::new(None::<Bounds<Pixels>>));
+        let danmu = self
+            .content
+            .smtc_metadata
+            .is_some()
+            .then(crate::sources::danmu::danmu_enabled);
 
         div()
             .id("media-island")
             .overflow_hidden()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_, _, _, cx| {
-                    cx.defer(|cx| crate::media_popup::toggle(cx));
-                }),
-            )
+            .when(compact, |el| el.relative())
+            .when(!compact, |el| {
+                el.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_, _, _, cx| {
+                        cx.defer(|cx| crate::media_popup::toggle(cx));
+                    }),
+                )
+            })
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if this.hovering != *hovered {
                     this.hovering = *hovered;
@@ -606,14 +655,12 @@ impl Render for MediaStore {
                 move |el, delta| {
                     let p = if target { delta } else { 1.0 - delta };
                     let mut el = el
-                        .max_w(px(
-                            MAX_ISLAND_WIDTH * p
-                                + if hovering {
-                                    text_target - ISLAND_TEXT_WIDTH
-                                } else {
-                                    0.
-                                },
-                        ))
+                        .max_w(px(MAX_ISLAND_WIDTH * p
+                            + if hovering {
+                                text_window - ISLAND_TEXT_WIDTH
+                            } else {
+                                0.
+                            }))
                         .flex()
                         .flex_row()
                         .items_center()
@@ -630,17 +677,14 @@ impl Render for MediaStore {
                         );
                     }
                     if has_art {
-                        el = el.child(
-                            div().with_animation(
-                                ("spec-presence", playing as usize),
-                                Animation::new(Duration::from_millis(150))
-                                    .with_easing(ease_in_out),
-                                move |el, delta| {
-                                    let q = if playing { delta } else { 1.0 - delta };
-                                    el.opacity(q).child(spectrum_bars(phase, p * q))
-                                },
-                            ),
-                        );
+                        el = el.child(div().with_animation(
+                            ("spec-presence", playing as usize),
+                            Animation::new(Duration::from_millis(150)).with_easing(ease_in_out),
+                            move |el, delta| {
+                                let q = if playing { delta } else { 1.0 - delta };
+                                el.opacity(q).child(spectrum_bars(phase, p * q))
+                            },
+                        ));
                     }
                     if !text.is_empty() {
                         let text = text.clone();
@@ -652,7 +696,7 @@ impl Render for MediaStore {
                         let dwell_frac = 1000. / cycle_ms as f32;
                         el = el.child(
                             div()
-                                .max_w(px(text_target))
+                                .max_w(px(text_window))
                                 .overflow_hidden()
                                 .ml(px(8.))
                                 .mr(px(10.))
@@ -663,10 +707,9 @@ impl Render for MediaStore {
                                     move |el, delta| {
                                         let t = if hovering {
                                             ISLAND_TEXT_WIDTH
-                                                + (text_target - ISLAND_TEXT_WIDTH) * delta
+                                                + (text_window - ISLAND_TEXT_WIDTH) * delta
                                         } else {
-                                            text_target
-                                                - (text_target - ISLAND_TEXT_WIDTH) * delta
+                                            text_window - (text_window - ISLAND_TEXT_WIDTH) * delta
                                         };
                                         el.max_w(px(t))
                                     },
@@ -681,9 +724,9 @@ impl Render for MediaStore {
                                                 div()
                                                     .with_animation(
                                                         "marquee",
-                                                        Animation::new(
-                                                            Duration::from_millis(cycle_ms),
-                                                        )
+                                                        Animation::new(Duration::from_millis(
+                                                            cycle_ms,
+                                                        ))
                                                         .repeat()
                                                         .with_easing(move |t| {
                                                             let d = dwell_frac;
@@ -699,10 +742,8 @@ impl Render for MediaStore {
                                                             }
                                                         }),
                                                         move |el, delta| {
-                                                            el.ml(px(
-                                                                marquee_pad
-                                                                    - marquee_travel * delta,
-                                                            ))
+                                                            el.ml(px(marquee_pad
+                                                                - marquee_travel * delta))
                                                         },
                                                     )
                                                     .child(text.clone()),
@@ -711,11 +752,215 @@ impl Render for MediaStore {
                                 ),
                         );
                     }
+                    if compact {
+                        el = el
+                            .child(compact_overlay(hovering, playing, danmu))
+                            .when_some(progress, |el, (ratio, end_ms)| {
+                                el.child(compact_progress(
+                                    hovering,
+                                    ratio,
+                                    end_ms,
+                                    progress_track.clone(),
+                                ))
+                            });
+                    }
                     el
                 },
             )
             .into_any_element()
     }
+}
+
+/// compact 悬停覆盖层：“中深两浅”钟形蒙版盖全岛——gpui 线性渐变仅支持
+/// 两个 stop，用左右两半拼接：各自从岛缘渐隐、在中心汇于峰值
+/// （rgba(0x10101499)），看不出蒙版/岛边界；中央横排上一首/播放暂停/
+/// 下一首（+弹幕开关），随 hover 淡入淡出，两侧文本保持可读
+fn compact_overlay(hovering: bool, playing: bool, danmu: Option<bool>) -> impl IntoElement {
+    let toggle = if playing {
+        IconName::Pause
+    } else {
+        IconName::Play
+    };
+    div()
+        .id("compact-overlay")
+        .absolute()
+        .inset_0()
+        .with_animation(
+            ("compact-overlay", hovering as usize),
+            Animation::new(Duration::from_millis(150)).with_easing(ease_in_out),
+            move |el, delta| {
+                let q = if hovering { delta } else { 1.0 - delta };
+                el.opacity(q)
+            },
+        )
+        .child(
+            div()
+                .id("compact-scrim-l")
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .w(relative(0.5))
+                .bg(linear_gradient(
+                    90.,
+                    linear_color_stop(rgba(0x10101400), 0.),
+                    linear_color_stop(rgba(0x10101499), 1.),
+                )),
+        )
+        .child(
+            div()
+                .id("compact-scrim-r")
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .w(relative(0.5))
+                .bg(linear_gradient(
+                    270.,
+                    linear_color_stop(rgba(0x10101400), 0.),
+                    linear_color_stop(rgba(0x10101499), 1.),
+                )),
+        )
+        .child(
+            div()
+                .id("compact-controls")
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .size_full()
+                .gap(px(6.))
+                .child(compact_ctl(
+                    "c-prev",
+                    IconName::SkipBack,
+                    MediaCommand::Previous,
+                ))
+                .child(compact_ctl(
+                    "c-toggle",
+                    toggle,
+                    MediaCommand::TogglePlayPause,
+                ))
+                .child(compact_ctl(
+                    "c-next",
+                    IconName::SkipForward,
+                    MediaCommand::Next,
+                ))
+                .when_some(danmu, |el, on| el.child(compact_danmu_ctl(on))),
+        )
+}
+
+/// compact 弹幕开关：仅弹幕源可用时显示，开启时高亮；开/关 overlay 窗口 defer 到帧外
+fn compact_danmu_ctl(on: bool) -> impl IntoElement {
+    div()
+        .id("c-danmu")
+        .flex()
+        .items_center()
+        .p(px(2.))
+        .rounded(px(4.))
+        .hover(|style| style.bg(rgba(0xFFFFFF28)))
+        .when(on, |el| el.bg(rgba(0xFFFFFF33)))
+        .child(
+            div()
+                .text_size(px(14.))
+                .text_color(rgba(0xFFFFFFEB))
+                .child(IconName::Captions),
+        )
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.defer(|cx| {
+                crate::danmu::toggle(cx);
+                let media = cx.global::<crate::MediaGlobal>().0.clone();
+                media.update(cx, |_, cx| cx.notify());
+            });
+        })
+}
+
+/// compact 播放控件按钮：点击直接提交媒体命令
+fn compact_ctl(id: &'static str, icon: IconName, command: MediaCommand) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .p(px(2.))
+        .rounded(px(4.))
+        .hover(|style| style.bg(rgba(0xFFFFFF28)))
+        .child(
+            div()
+                .text_size(px(14.))
+                .text_color(rgba(0xFFFFFFEB))
+                .child(icon),
+        )
+        .on_mouse_down(MouseButton::Left, move |_, _, _| submit(command))
+}
+
+/// compact 底边进度条：贴岛底边、左右内缩避开圆角，随 hover 淡入淡出。
+/// 命中区加高到 8px，点击/按住拖动按 x 换算 Seek
+fn compact_progress(
+    hovering: bool,
+    ratio: f32,
+    end_ms: u64,
+    track: Rc<Cell<Option<Bounds<Pixels>>>>,
+) -> impl IntoElement {
+    let down = track.clone();
+    let drag = track.clone();
+    div()
+        .id("compact-progress")
+        .absolute()
+        .left(px(6.))
+        .right(px(6.))
+        .bottom_0()
+        .h(px(8.))
+        .flex()
+        .items_center()
+        .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, _, _| {
+            if let Some(b) = down.get() {
+                submit(MediaCommand::Seek(seek_ms(event.position.x, &b, end_ms)));
+            }
+        })
+        .on_mouse_move(move |event: &MouseMoveEvent, _, _| {
+            if event.pressed_button == Some(MouseButton::Left) {
+                if let Some(b) = drag.get() {
+                    submit(MediaCommand::Seek(seek_ms(event.position.x, &b, end_ms)));
+                }
+            }
+        })
+        .child(
+            div()
+                .id("compact-progress-visual")
+                .relative()
+                .w_full()
+                .h(px(3.))
+                .rounded_full()
+                .bg(rgba(0xFFFFFF3C))
+                .with_animation(
+                    ("compact-progress", hovering as usize),
+                    Animation::new(Duration::from_millis(150)).with_easing(ease_in_out),
+                    move |el, delta| {
+                        let q = if hovering { delta } else { 1.0 - delta };
+                        el.opacity(q)
+                    },
+                )
+                // 轨道实际 x 范围由内嵌 canvas 每帧上报（避开命中区左右 6px 内边距）
+                .child(
+                    canvas(move |bounds, _, _| track.set(Some(bounds)), |_, _, _, _| {})
+                        .absolute()
+                        .inset_0(),
+                )
+                .child(
+                    div()
+                        .id("compact-progress-fill")
+                        .h_full()
+                        .rounded_full()
+                        .w(relative(ratio))
+                        .bg(rgba(0xFFFFFFEB)),
+                ),
+        )
+}
+
+/// 按轨道窗口坐标把鼠标 x 换算成 Seek 毫秒
+fn seek_ms(x: Pixels, bounds: &Bounds<Pixels>, end_ms: u64) -> u64 {
+    let ratio = ((x.as_f32() - bounds.origin.x.as_f32()) / bounds.size.width.as_f32().max(1.))
+        .clamp(0., 1.);
+    (ratio * end_ms as f32) as u64
 }
 
 /// 用正弦模拟构建 4 根频谱条

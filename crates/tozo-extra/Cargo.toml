@@ -1,0 +1,19 @@
+[package]
+name = "tozo-extra"
+description = "Extra data engines for tozo-gpui (bilibili danmaku fetch & cache)"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+reqwest = { version = "0.13.4", features = ["cookies", "json"] }
+serde_json = "1"
+prost = "0.14"
+url = "2.5.8"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[[example]]
+name = "danmu_probe"

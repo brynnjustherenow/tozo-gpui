@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::prelude::*;
@@ -11,7 +11,6 @@ const POPUP_WIDTH: f32 = 360.;
 const POPUP_HEIGHT: f32 = 440.;
 const POPUP_X_MARGIN: f32 = 12.;
 const BAR_HEIGHT: f64 = 30.0;
-const MAX_ROWS: usize = 40;
 
 /// 切换进程弹窗：带防抖，已开则关闭
 pub fn toggle(cx: &mut App) {
@@ -99,7 +98,7 @@ impl SysPopup {
 }
 
 impl Render for SysPopup {
-    /// 渲染进程列表：按当前排序键排序，最多显示 MAX_ROWS 行
+    /// 渲染进程列表：按当前排序键排序，uniform_list 虚拟化滚动（滚轮翻全部进程）
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut rows = self.procs.read(cx).procs.clone();
         rows.sort_by(|a, b| match self.sort {
@@ -109,6 +108,7 @@ impl Render for SysPopup {
         if !self.desc {
             rows.reverse();
         }
+        let rows = Arc::new(rows);
         let hovered = self.hovered;
         let entity = cx.entity();
 
@@ -171,15 +171,17 @@ impl Render for SysPopup {
                     .child(div().w(px(16.))),
             )
             .child(
-                div()
-                    .id("proc-list")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .overflow_hidden()
-                    .children(rows.into_iter().take(MAX_ROWS).map(move |proc| {
-                        proc_row(proc, hovered, entity.clone())
-                    })),
+                uniform_list(
+                    "proc-list",
+                    rows.len(),
+                    move |range, _window, _cx| {
+                        range
+                            .map(|ix| proc_row(rows[ix].clone(), hovered, entity.clone()))
+                            .collect()
+                    },
+                )
+                .flex_1()
+                .w_full(),
             )
             .with_animation(
                 "sys-pop-in",
@@ -229,12 +231,12 @@ fn proc_row(proc: ProcSnapshot, hovered: Option<u32>, entity: Entity<SysPopup>) 
     };
     div()
         .id(("proc", pid))
+        .w_full()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(8.))
         .h(px(20.))
-        .px(px(4.))
         .rounded(px(4.))
         .when(is_hovered, |el| el.bg(rgba(0xFFFFFF28)))
         .on_hover(move |is_hovered: &bool, _, cx| {

@@ -477,6 +477,11 @@ impl WindowsPlatform {
                         break;
                     };
                     for hwnd in all_windows.read().iter() {
+                        // [tozo patch] 渲染线程与窗口销毁的竞态：窗口表残留的死句柄
+                        // 直接跳过，避免 RedrawWindow 报 0x80070578（下轮列表即清理）
+                        if !unsafe { IsWindow(Some(hwnd.as_raw())) }.as_bool() {
+                            continue;
+                        }
                         unsafe {
                             if let Some(signal_at) = signal_at {
                                 if IsWindowVisible(hwnd.as_raw()).as_bool()
@@ -1720,7 +1725,7 @@ fn handle_gpu_device_lost(
     *directx_devices = try_to_recover_from_device_lost(|| {
         DirectXDevices::new().context("Failed to recreate new DirectX devices after device lost")
     })?;
-    log::info!("DirectX devices successfully recreated.");
+    log::debug!("DirectX devices successfully recreated.");
 
     let lparam = LPARAM(directx_devices as *const _ as _);
     unsafe {

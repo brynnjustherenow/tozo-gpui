@@ -16,6 +16,7 @@ use crate::sources::traypanel::TrayPanel;
 
 mod audio_popup;
 mod calendar;
+mod danmu;
 mod media_popup;
 mod menu;
 mod popups;
@@ -109,8 +110,9 @@ fn init_logging() {
     use tracing_subscriber::util::SubscriberInitExt;
 
     std::panic::set_hook(Box::new(|info| tracing::error!("panic: {info}")));
+    // 默认 info；systray_util 的托盘图标增删日志极高频，整体压到 warn（RUST_LOG 可覆盖）
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,systray_util=warn"));
 
     match (console_attached(), file_appender()) {
         (true, Some((appender, dir))) => {
@@ -118,13 +120,19 @@ fn init_logging() {
                 .with(filter)
                 .with(
                     tracing_subscriber::fmt::layer()
-                        .with_target(false)
+                        .with_target(true)
+                        .with_file(true)
+                        .with_line_number(true)
+                        .with_thread_names(true)
                         .with_timer(LocalTimer)
                         .with_writer(std::io::stderr),
                 )
                 .with(
                     tracing_subscriber::fmt::layer()
-                        .with_target(false)
+                        .with_target(true)
+                        .with_file(true)
+                        .with_line_number(true)
+                        .with_thread_names(true)
                         .with_ansi(false)
                         .with_timer(LocalTimer)
                         .with_writer(appender),
@@ -137,7 +145,10 @@ fn init_logging() {
                 .with(filter)
                 .with(
                     tracing_subscriber::fmt::layer()
-                        .with_target(false)
+                        .with_target(true)
+                        .with_file(true)
+                        .with_line_number(true)
+                        .with_thread_names(true)
                         .with_timer(LocalTimer)
                         .with_writer(std::io::stderr),
                 )
@@ -149,7 +160,10 @@ fn init_logging() {
                 .with(filter)
                 .with(
                     tracing_subscriber::fmt::layer()
-                        .with_target(false)
+                        .with_target(true)
+                        .with_file(true)
+                        .with_line_number(true)
+                        .with_thread_names(true)
                         .with_ansi(false)
                         .with_timer(LocalTimer)
                         .with_writer(appender),
@@ -173,7 +187,10 @@ fn console_attached() -> bool {
 }
 
 /// 构造 log/ 目录下的按日滚动 appender：TOZO_LOG_DIR 优先，其次 exe 目录，失败退回 temp
-fn file_appender() -> Option<(tracing_appender::rolling::RollingFileAppender, std::path::PathBuf)> {
+fn file_appender() -> Option<(
+    tracing_appender::rolling::RollingFileAppender,
+    std::path::PathBuf,
+)> {
     use tracing_appender::rolling::{Builder, Rotation};
 
     fn build(dir: &std::path::Path) -> Option<tracing_appender::rolling::RollingFileAppender> {
@@ -210,14 +227,18 @@ struct LocalTimer;
 
 impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
     fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
-        write!(w, "{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"))
+        write!(
+            w,
+            "{}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")
+        )
     }
 }
 
 /// 等待 bar 窗口 HWND 就绪后注册 appbar 并申请屏幕顶部占位
 async fn register_appbar(cx: &mut AsyncApp, pid: u32, monitor: tozo_platform::Monitor, scale: f64) {
     if std::env::var_os("TOZO_NO_APPBAR").is_some() {
-        tracing::info!("[spike] TOZO_NO_APPBAR set, skipping appbar");
+        tracing::debug!("[spike] TOZO_NO_APPBAR set, skipping appbar");
         return;
     }
     let mut hwnd_value = None;
@@ -240,12 +261,12 @@ async fn register_appbar(cx: &mut AsyncApp, pid: u32, monitor: tozo_platform::Mo
         let hwnd = tozo_platform::hwnd(hwnd_value);
         let _ = tozo_platform::apply_backdrop(hwnd, tozo_platform::Backdrop::None);
         let accent_reset = crate::win::accent_disable(hwnd);
-        tracing::info!("[spike] accent_disable={accent_reset}");
+        tracing::debug!("[spike] accent_disable={accent_reset}");
         match tozo_platform::appbar::register(hwnd) {
             Ok(()) => {
                 let height = (BAR_HEIGHT_LOGICAL * scale).round() as i32;
                 let approved = tozo_platform::appbar::set_top_position(hwnd, &monitor.rect, height);
-                tracing::info!(
+                tracing::debug!(
                     "[spike] appbar approved=({},{},{},{}) window_rect={:?}",
                     approved.left,
                     approved.top,
@@ -293,7 +314,6 @@ impl Render for Bar {
                 MouseButton::Right,
                 cx.listener(|_, _, _, cx| menu::open(cx)),
             )
-            .child(self.tray.clone())
             .child(div().flex_1())
             .child(self.media.clone())
             .child(
@@ -309,6 +329,7 @@ impl Render for Bar {
                     .child(self.sys.clone())
                     .child(self.net.clone())
                     .child(self.audio.clone())
+                    .child(self.tray.clone())
                     .child(self.clock.clone()),
             )
     }

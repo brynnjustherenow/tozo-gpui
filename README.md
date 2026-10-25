@@ -4,7 +4,7 @@
 
 [freya ver](https://github.com/brynnjustherenow/tozo.git)
 
-原本是想继续用freya实现lua做配置文件的，但是看到即将发布的gpui-shell还是决定迁移到gpui了
+原本是想继续用freya实现lua做配置文件的，但是看到gpui-shell可以用js做插件，还是决定迁移到gpui了
 
 #### 目前已实现
 

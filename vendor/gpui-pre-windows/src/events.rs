@@ -785,6 +785,12 @@ impl WindowsWindowInner {
     }
 
     fn handle_activate_msg(self: &Rc<Self>, wparam: WPARAM) -> Option<isize> {
+        // [tozo patch] 拆窗期间（DestroyWindow 同步发 WM_ACTIVATE 失活）直接跳过：
+        // gpui 侧窗口已从注册表移除，激活回调 update 必报 "window not found"
+        if self.state.closing.get() {
+            return None;
+        }
+
         let activated = wparam.loword() > 0;
 
         let events = self
@@ -1225,7 +1231,7 @@ impl WindowsWindowInner {
         if unsafe { !parameter.is_null() && !parameter.is_empty() }
             && let Some(parameter_string) = unsafe { parameter.to_string() }.log_err()
         {
-            log::info!("System settings changed: {}", parameter_string);
+            log::debug!("System settings changed: {}", parameter_string);
             if parameter_string.as_str() == "ImmersiveColorSet" {
                 let new_appearance = system_appearance()
                     .context("unable to get system appearance when handling ImmersiveColorSet")

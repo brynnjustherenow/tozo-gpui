@@ -108,16 +108,14 @@ impl Render for MediaPopup {
         let playing = info.playing;
         let position_ms = info.position_ms;
         let end_ms = info.end_ms;
-        let artwork = info.artwork.as_ref().and_then(|art| {
-            match &self.decoded {
-                Some((id, img)) if *id == art.id => Some(img.clone()),
-                _ => {
-                    let img = crate::sources::media::decode_artwork(art);
-                    if let Some(img) = &img {
-                        self.decoded = Some((art.id, img.clone()));
-                    }
-                    img
+        let artwork = info.artwork.as_ref().and_then(|art| match &self.decoded {
+            Some((id, img)) if *id == art.id => Some(img.clone()),
+            _ => {
+                let img = crate::sources::media::decode_artwork(art);
+                if let Some(img) = &img {
+                    self.decoded = Some((art.id, img.clone()));
                 }
+                img
             }
         });
 
@@ -132,6 +130,34 @@ impl Render for MediaPopup {
         } else {
             IconName::Play
         };
+
+        let has_danmu_source = info.smtc_metadata.is_some();
+        let danmu_on = crate::sources::danmu::danmu_enabled();
+
+        // 弹幕开关：开/关 overlay 窗口必须 defer
+        let danmu_toggle = has_danmu_source.then(|| {
+            div()
+                .id("danmu-toggle")
+                .flex()
+                .items_center()
+                .px_1()
+                .rounded(px(6.))
+                .hover(|style| style.bg(rgba(0xFFFFFF28)))
+                .when(danmu_on, |el| el.bg(rgba(0xFFFFFF33)))
+                .child(
+                    div()
+                        .text_size(px(16.))
+                        .text_color(rgba(0xFFFFFFEB))
+                        .child(IconName::Captions),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_, _, _, cx| {
+                        cx.defer(crate::danmu::toggle);
+                        cx.notify();
+                    }),
+                )
+        });
 
         div()
             .id("media-popup")
@@ -193,6 +219,7 @@ impl Render for MediaPopup {
                             .justify_end()
                             .items_center()
                             .gap_1()
+                            .children(danmu_toggle)
                             .child(ctl_button(
                                 "prev",
                                 IconName::SkipBack,

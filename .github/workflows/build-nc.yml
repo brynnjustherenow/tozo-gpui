@@ -1,0 +1,54 @@
+name: Build NC Release
+
+# 推 vX.Y.Z 格式的 tag 时自动构建 nc 版本（--features gui，无控制台窗口）
+# 并作为资产附到对应 tag 的 GitHub Release 上
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-nc:
+    name: Build no-console release
+    runs-on: windows-latest
+    steps:
+      - name: 校验 tag 格式（严格 vX.Y.Z，如 v1.0.0）
+        shell: bash
+        run: |
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '${GITHUB_REF_NAME}' 不符合 vX.Y.Z 格式，不构建"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 构建 nc 版本
+        shell: bash
+        run: cargo build --release --features gui
+
+      - name: 整理产物
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          cp target/release/tozo-gpui.exe "dist/tozo-gpui-${VERSION}-x86_64-windows-nc.exe"
+          ls -l dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tozo-gpui-nc-windows
+          path: dist/tozo-gpui-*-x86_64-windows-nc.exe
+          if-no-files-found: error
+
+      - name: 附到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/tozo-gpui-*-x86_64-windows-nc.exe
+          generate_release_notes: true

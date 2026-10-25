@@ -119,9 +119,15 @@ impl DirectManipulationHandler {
 impl Drop for DirectManipulationHandler {
     fn drop(&mut self) {
         unsafe {
-            self.viewport.Stop().log_err();
-            self.viewport.Abandon().log_err();
-            self.manager.Deactivate(self.window).log_err();
+            // teardown 与 DestroyWindow 有竞态：句柄已销毁时三个收尾调用都会报
+            // "无效的窗口句柄"（0x80070578 等）——句柄已死就整体跳过
+            eprint!("drop a window!");
+            if !IsWindow(Some(self.window)).as_bool() {
+                return;
+            }
+            let _ = self.viewport.Stop();
+            let _ = self.viewport.Abandon();
+            let _ = self.manager.Deactivate(self.window);
         }
     }
 }

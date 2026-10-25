@@ -5,16 +5,33 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use super::clock::pill;
 use windows::Win32::NetworkManagement::IpHelper::{
-    GetExtendedTcpTable, MIB_TCP6TABLE_OWNER_MODULE, MIB_TCPTABLE_OWNER_MODULE,
-    TCP_TABLE_OWNER_MODULE_ALL,
+    GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6TABLE_OWNER_MODULE, MIB_TCPTABLE_OWNER_MODULE,
+    MIB_UDP6TABLE_OWNER_MODULE, MIB_UDPTABLE_OWNER_MODULE, TCP_TABLE_OWNER_MODULE_ALL,
+    UDP_TABLE_OWNER_MODULE,
 };
 use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Proto {
+    Tcp,
+    Udp,
+}
+
+impl Proto {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Proto::Tcp => "TCP",
+            Proto::Udp => "UDP",
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PortEntry {
     pub port: u16,
     pub addr: String,
     pub pid: u32,
+    pub proto: Proto,
 }
 
 pub struct PortStore {
@@ -31,10 +48,10 @@ impl PortStore {
                 let entries = cx.background_executor().spawn(async move { scan() }).await;
                 if entries != prev {
                     for e in entries.iter().filter(|e| !prev.contains(e)) {
-                        tracing::info!("[ports] + {}:{} pid={}", e.addr, e.port, e.pid);
+                        tracing::debug!("[ports] + {} {}:{} pid={}", e.proto.as_str(), e.addr, e.port, e.pid);
                     }
                     for e in prev.iter().filter(|e| !entries.contains(e)) {
-                        tracing::info!("[ports] - {}:{} pid={}", e.addr, e.port, e.pid);
+                        tracing::debug!("[ports] - {} {}:{} pid={}", e.proto.as_str(), e.addr, e.port, e.pid);
                     }
                 }
                 prev = entries.clone();
@@ -92,89 +109,121 @@ impl Render for PortStore {
     }
 }
 
-/// 扫描 IPv4/IPv6 的 TCP 监听表，按端口排序并按 (地址, 端口) 去重
+/// 两段式查询扩展表：先探 size 再填充；表在两次调用间变大（rc=122）时
+/// 按新 size 扩容重试，避免竞态丢整族数据
+fn query_table(
+    mut call: impl FnMut(Option<*mut core::ffi::c_void>, &mut u32) -> u32,
+) -> Option<Vec<u8>> {
+    let mut size = 0u32;
+    let _ = call(None, &mut size);
+    if size == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; size as usize];
+    for _ in 0..4 {
+        let rc = call(Some(buf.as_mut_ptr() as *mut core::ffi::c_void), &mut size);
+        if rc == 0 {
+            return Some(buf);
+        }
+        if rc == 122 && size as usize > buf.len() {
+            buf.resize(size as usize, 0);
+            continue;
+        }
+        return None;
+    }
+    None
+}
+
+/// 扫描 IPv4/IPv6 的 TCP（仅 LISTEN）与 UDP 监听表，按端口排序、
+/// (地址, 端口, 协议) 去重并过滤系统侧监听
 fn scan() -> Vec<PortEntry> {
     let mut out = Vec::new();
-    unsafe {
-        for family in [AF_INET.0 as u32, AF_INET6.0 as u32] {
-            let mut size = 0u32;
-            let _ =
-                GetExtendedTcpTable(None, &mut size, false, family, TCP_TABLE_OWNER_MODULE_ALL, 0);
-            if size == 0 {
-                continue;
-            }
-            let mut buf = vec![0u8; size as usize];
-            // The table can grow between the size probe and the fill call
-            // (ERROR_INSUFFICIENT_BUFFER); regrow and retry instead of
-            // dropping the whole family for this beat.
-            let mut ok = false;
-            for _ in 0..4 {
-                let rc = GetExtendedTcpTable(
-                    Some(buf.as_mut_ptr() as *mut core::ffi::c_void),
-                    &mut size,
-                    false,
-                    family,
-                    TCP_TABLE_OWNER_MODULE_ALL,
-                    0,
-                );
-                if rc == 0 {
-                    ok = true;
-                    break;
-                }
-                if rc == 122 && size as usize > buf.len() {
-                    buf.resize(size as usize, 0);
-                    continue;
-                }
-                break;
-            }
-            if !ok {
-                continue;
-            }
-            if family == AF_INET.0 as u32 {
-                let table = &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_MODULE);
-                let n = table.dwNumEntries as usize;
-                if n == 0 {
-                    continue;
-                }
-                let rows = std::slice::from_raw_parts(&table.table[0], n);
-                for row in rows {
-                    if row.dwState != 2 {
-                        continue;
+    for family in [AF_INET.0 as u32, AF_INET6.0 as u32] {
+        let is_v4 = family == AF_INET.0 as u32;
+
+        // TCP：仅取 LISTEN（dwState == 2）行
+        let tcp = query_table(|ptr, size| unsafe {
+            GetExtendedTcpTable(ptr, size, false, family, TCP_TABLE_OWNER_MODULE_ALL, 0)
+        });
+        if let Some(buf) = tcp {
+            unsafe {
+                if is_v4 {
+                    let table = &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_MODULE);
+                    let rows = std::slice::from_raw_parts(&table.table[0], table.dwNumEntries as usize);
+                    for row in rows {
+                        if row.dwState != 2 {
+                            continue;
+                        }
+                        out.push(PortEntry {
+                            port: flip_port(row.dwLocalPort),
+                            addr: format_v4(row.dwLocalAddr),
+                            pid: row.dwOwningPid,
+                            proto: Proto::Tcp,
+                        });
                     }
-                    out.push(PortEntry {
-                        port: flip_port(row.dwLocalPort),
-                        addr: format_v4(row.dwLocalAddr),
-                        pid: row.dwOwningPid,
-                    });
-                }
-            } else {
-                let table = &*(buf.as_ptr() as *const MIB_TCP6TABLE_OWNER_MODULE);
-                let n = table.dwNumEntries as usize;
-                if n == 0 {
-                    continue;
-                }
-                let rows = std::slice::from_raw_parts(&table.table[0], n);
-                for row in rows {
-                    if row.dwState != 2 {
-                        continue;
+                } else {
+                    let table = &*(buf.as_ptr() as *const MIB_TCP6TABLE_OWNER_MODULE);
+                    let rows = std::slice::from_raw_parts(&table.table[0], table.dwNumEntries as usize);
+                    for row in rows {
+                        if row.dwState != 2 {
+                            continue;
+                        }
+                        out.push(PortEntry {
+                            port: flip_port(row.dwLocalPort),
+                            addr: format_v6(&row.ucLocalAddr),
+                            pid: row.dwOwningPid,
+                            proto: Proto::Tcp,
+                        });
                     }
-                    out.push(PortEntry {
-                        port: flip_port(row.dwLocalPort),
-                        addr: format_v6(&row.ucLocalAddr),
-                        pid: row.dwOwningPid,
-                    });
+                }
+            }
+        }
+
+        // UDP：无状态位，全部行都是"监听"
+        let udp = query_table(|ptr, size| unsafe {
+            GetExtendedUdpTable(ptr, size, false, family, UDP_TABLE_OWNER_MODULE, 0)
+        });
+        if let Some(buf) = udp {
+            unsafe {
+                if is_v4 {
+                    let table = &*(buf.as_ptr() as *const MIB_UDPTABLE_OWNER_MODULE);
+                    let rows = std::slice::from_raw_parts(&table.table[0], table.dwNumEntries as usize);
+                    for row in rows {
+                        out.push(PortEntry {
+                            port: flip_port(row.dwLocalPort),
+                            addr: format_v4(row.dwLocalAddr),
+                            pid: row.dwOwningPid,
+                            proto: Proto::Udp,
+                        });
+                    }
+                } else {
+                    let table = &*(buf.as_ptr() as *const MIB_UDP6TABLE_OWNER_MODULE);
+                    let rows = std::slice::from_raw_parts(&table.table[0], table.dwNumEntries as usize);
+                    for row in rows {
+                        out.push(PortEntry {
+                            port: flip_port(row.dwLocalPort),
+                            addr: format_v6(&row.ucLocalAddr),
+                            pid: row.dwOwningPid,
+                            proto: Proto::Udp,
+                        });
+                    }
                 }
             }
         }
     }
-    out.sort_by(|a, b| a.port.cmp(&b.port).then_with(|| a.addr.cmp(&b.addr)));
+    out.sort_by(|a, b| {
+        a.port
+            .cmp(&b.port)
+            .then_with(|| (a.proto == Proto::Udp).cmp(&(b.proto == Proto::Udp)))
+            .then_with(|| a.addr.cmp(&b.addr))
+    });
     // A tearing-down listener can coexist with its replacement on the same
     // addr:port, with OwningPid already zeroed; keep the live row.
     let mut deduped: Vec<PortEntry> = Vec::with_capacity(out.len());
     for entry in out {
         match deduped
             .iter_mut()
-            .find(|e| e.addr == entry.addr && e.port == entry.port)
+            .find(|e| e.addr == entry.addr && e.port == entry.port && e.proto == entry.proto)
         {
             Some(existing) => {
                 if existing.pid == 0 && entry.pid != 0 {
@@ -184,6 +233,10 @@ fn scan() -> Vec<PortEntry> {
             None => deduped.push(entry),
         }
     }
+    // [tozo] 过滤系统侧监听噪音：pid 0 = 销毁中的僵尸行（无 pid!=0 孪生活行时
+    // 会残留在表里），pid 4 = System 进程（135/445 等 OS 固有服务）。
+    // 两类都显示为 "System"，对用户无信息量。
+    deduped.retain(|e| e.pid != 0 && e.pid != 4);
     deduped
 }
 

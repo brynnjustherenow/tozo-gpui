@@ -11,24 +11,22 @@ pub struct ClockStore {
 impl ClockStore {
     /// 启动分钟对齐定时任务，每到整分更新一次时间
     pub fn new(cx: &mut Context<Self>) -> Self {
-        cx.spawn(async move |this, cx| {
-            loop {
-                let now = Local::now();
-                let next_minute = now
-                    .with_second(0)
-                    .and_then(|t| t.with_nanosecond(0))
-                    .map(|t| t + chrono::TimeDelta::minutes(1))
-                    .unwrap_or(now + chrono::TimeDelta::minutes(1));
-                let wait = (next_minute - now)
-                    .to_std()
-                    .unwrap_or(Duration::from_secs(1))
-                    .max(Duration::from_millis(50));
-                cx.background_executor().timer(wait).await;
-                let _ = this.update(cx, |this, cx| {
-                    this.dt = Local::now();
-                    cx.notify();
-                });
-            }
+        cx.spawn(async move |this, cx| loop {
+            let now = Local::now();
+            let next_minute = now
+                .with_second(0)
+                .and_then(|t| t.with_nanosecond(0))
+                .map(|t| t + chrono::TimeDelta::minutes(1))
+                .unwrap_or(now + chrono::TimeDelta::minutes(1));
+            let wait = (next_minute - now)
+                .to_std()
+                .unwrap_or(Duration::from_secs(1))
+                .max(Duration::from_millis(50));
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |this, cx| {
+                this.dt = Local::now();
+                cx.notify();
+            });
         })
         .detach();
         Self { dt: Local::now() }
@@ -58,7 +56,6 @@ pub(crate) fn pill() -> gpui_kit::Div {
         .px_3()
         .py_1()
         .rounded_full()
-        .bg(rgba(0x1C1C20A0))
         .text_size(px(12.))
         .text_color(rgba(0xFFFFFFEB))
 }

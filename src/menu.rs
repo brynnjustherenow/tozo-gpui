@@ -30,7 +30,7 @@ pub fn open(cx: &mut App) {
     let mon_w = (monitor.rect.right - monitor.rect.left) as f64 / scale;
     let mon_h = (monitor.rect.bottom - monitor.rect.top) as f64 / scale;
     let w = 176.0f32;
-    let h = 74.0f32;
+    let h = 108.0f32;
     let x = ((mx as f64 - monitor.rect.left as f64) / scale)
         .min(mon_w - w as f64 - 8.)
         .max(0.);
@@ -82,6 +82,27 @@ impl Render for Menu {
             .rounded_xl()
             .bg(rgba(0x1C1C20E6))
             .font_family("Microsoft YaHei")
+            .child(
+                div()
+                    .id("menu-compact")
+                    .flex()
+                    .items_center()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .text_size(px(12.))
+                    .text_color(rgba(0xFFFFFFEB))
+                    .hover(|style| style.bg(rgba(0xFFFFFF2E)))
+                    .on_click(cx.listener(|_, _, window, cx| {
+                        let media = cx.global::<crate::MediaGlobal>().0.clone();
+                        media.update(cx, |store, cx| {
+                            store.compact = !store.compact;
+                            cx.notify();
+                        });
+                        window.remove_window();
+                    }))
+                    .child("紧凑媒体岛"),
+            )
             .child(
                 div()
                     .id("menu-quit")

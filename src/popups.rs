@@ -22,6 +22,8 @@ pub struct Popups {
     pub sys_closed_at: Option<Instant>,
     pub ports: Option<PopupSlot>,
     pub ports_closed_at: Option<Instant>,
+    pub danmu: Option<PopupSlot>,
+    pub danmu_closed_at: Option<Instant>,
     pub tray: Option<PopupSlot>,
     pub tray_closed_at: Option<Instant>,
 }
@@ -57,6 +59,11 @@ pub fn init(cx: &mut App) {
         if popups.ports.as_ref().is_some_and(|p| p.window.window_id() == id) {
             popups.ports = None;
             popups.ports_closed_at = Some(Instant::now());
+        }
+        if popups.danmu.as_ref().is_some_and(|p| p.window.window_id() == id) {
+            popups.danmu = None;
+            popups.danmu_closed_at = Some(Instant::now());
+            crate::sources::danmu::set_danmu_enabled(false);
         }
         if popups.tray.as_ref().is_some_and(|p| p.window.window_id() == id) {
             popups.tray = None;

@@ -162,7 +162,7 @@ impl Render for PortsPopup {
                         div()
                             .text_size(px(11.))
                             .text_color(rgba(0xFFFFFF78))
-                            .child(format!("监听端口 {count} · TCP")),
+                            .child(format!("监听端口 {count} · TCP/UDP")),
                     ),
             )
             .child(
@@ -173,6 +173,7 @@ impl Render for PortsPopup {
                     .gap(px(8.))
                     .items_center()
                     .mb(px(2.))
+                    .child(header_cell("proto", "协议", 36.))
                     .child(header_cell("port", "端口", 52.))
                     .child(header_cell("addr", "地址", 120.))
                     .child(header_cell("proc", "进程", 0.)),
@@ -224,7 +225,7 @@ fn port_row(entry: PortEntry, names: &HashMap<u32, String>) -> impl IntoElement 
             .unwrap_or_else(|| "?".to_string())
     };
     div()
-        .id(format!("{}:{}", entry.port, entry.addr))
+        .id(format!("{}:{}:{}", entry.proto.as_str(), entry.port, entry.addr))
         .flex()
         .flex_row()
         .gap(px(8.))
@@ -233,6 +234,13 @@ fn port_row(entry: PortEntry, names: &HashMap<u32, String>) -> impl IntoElement 
         .px(px(4.))
         .rounded(px(4.))
         .hover(|style| style.bg(rgba(0xFFFFFF1E)))
+        .child(
+            div()
+                .w(px(36.))
+                .text_size(px(10.))
+                .text_color(rgba(0xFFFFFF78))
+                .child(entry.proto.as_str()),
+        )
         .child(
             div()
                 .w(px(52.))

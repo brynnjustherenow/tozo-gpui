@@ -62,6 +62,10 @@ pub struct WindowsWindowState {
     pub last_reported_capslock: Cell<Option<Capslock>>,
     pub hovered: Cell<bool>,
     pub last_visibility: Cell<Option<WindowVisibility>>,
+    /// [tozo patch] 拆窗进行中：WindowsWindow::drop 起置位。DestroyWindow 会同步派发
+    /// WM_ACTIVATE 失活，而此时 gpui 注册表已移除该窗口，激活回调 update 必失败
+    /// 并刷 "window not found" 错误——置位期间跳过该回调派发。
+    pub closing: Cell<bool>,
     pub direct_manipulation: DirectManipulationHandler,
 
     pub renderer: RefCell<DirectXRenderer>,
@@ -177,6 +181,7 @@ impl WindowsWindowState {
             last_reported_capslock: Cell::new(last_reported_capslock),
             hovered: Cell::new(hovered),
             last_visibility: Cell::new(None),
+            closing: Cell::new(false),
             renderer: RefCell::new(renderer),
             force_render_pending: Cell::new(false),
             click_state,
@@ -614,6 +619,8 @@ impl rwh::HasDisplayHandle for WindowsWindow {
 
 impl Drop for WindowsWindow {
     fn drop(&mut self) {
+        // [tozo patch] 先标记拆窗，拦截 DestroyWindow 期间同步派发的失活回调
+        self.0.state.closing.set(true);
         self.0.dialog_owner.close();
         unsafe { ShowWindowAsync(self.0.hwnd, SW_HIDE).ok().log_err() };
         // `DestroyWindow` below sends `WM_SHOWWINDOW`; without a callback the
@@ -626,9 +633,14 @@ impl Drop for WindowsWindow {
             .spawn(async move {
                 this.dialog_owner.when_idle().await;
                 let handle = this.hwnd;
-                unsafe {
-                    RevokeDragDrop(handle).log_err();
-                    DestroyWindow(handle).log_err();
+                // [tozo patch] click-away 等外部路径走 WM_CLOSE 时 wndproc 已销毁窗口，
+                // 句柄失效时跳过重复销毁，避免 RevokeDragDrop(0x80040102)
+                // / DestroyWindow(0x80070578) 的无效句柄报错
+                if unsafe { IsWindow(Some(handle)) }.as_bool() {
+                    unsafe {
+                        RevokeDragDrop(handle).log_err();
+                        DestroyWindow(handle).log_err();
+                    }
                 }
             })
             .detach();

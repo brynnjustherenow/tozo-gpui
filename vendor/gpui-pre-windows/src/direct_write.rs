@@ -1915,7 +1915,7 @@ fn get_system_ui_font_name() -> SharedString {
             let font_name = String::from_utf16_lossy(&info.lfFaceName);
             font_name.trim_matches(char::from(0)).to_owned().into()
         };
-        log::info!("Use {} as UI font.", font_family);
+        log::debug!("Use {} as UI font.", font_family);
         font_family
     }
 }
@@ -2028,7 +2028,7 @@ mod tests {
         let mut params_list = Vec::new();
         for ch in ['🫠', '🥹', '🧗', '🏋', '🚀', '🥺'] {
             let Some(glyph_id) = text_system.glyph_for_char(font_id, ch) else {
-                log::info!("no glyph found for {ch}");
+                log::debug!("no glyph found for {ch}");
                 continue;
             };
             let params = RenderGlyphParams {
@@ -2043,7 +2043,7 @@ mod tests {
             };
             let raster_bounds = text_system.glyph_raster_bounds(&params)?;
             if raster_bounds.size.width.0 == 0 || raster_bounds.size.height.0 == 0 {
-                log::info!("raster bounds are empty for {ch}");
+                log::debug!("raster bounds are empty for {ch}");
                 continue;
             }
             params_list.push((params, raster_bounds));
