@@ -43,3 +43,7 @@ The original plan was to keep using Freya with Lua-based config files, but after
 1. Enable Developer Mode in Chrome
 2. Choose "Load unpacked" and select the browser extension folder
 3. The default guest identity only fetches a small amount of danmaku. Put a `bilibili.tcookie` file in the exe directory with the cookie copied from the web player to get the full danmaku stream (with many comments they will overlap each other; I plan to add danmaku display settings to the config file later and fix this then)
+
+#### License
+
+[MIT](./LICENSE)
