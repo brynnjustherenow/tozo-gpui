@@ -1,5 +1,7 @@
 # tozo-gpui
 
+[English](./README.en.md) | 简体中文
+
 #### 本项目是tozo的gpui重写版
 
 [freya ver](https://github.com/brynnjustherenow/tozo.git)
@@ -10,7 +12,7 @@
 
 - [x] 支持smtc的播放源显示
 
-- [x] 当smtc来自bilibili时，支持拉取弹幕在桌面上显示（到底谁会用得到？但是做都做了）
+- [x] 当smtc来自bilibili时，支持拉取弹幕在桌面上显示（到底谁会用得到？）
 
 - [x] smtc媒体播放控制
 
@@ -22,9 +24,9 @@
 
 - [x] 监控系统端口占用以及控制
 
+- [x] 日志功能 
+
 #### 计划实现
-
-
 
 - [ ] 使用 ~~lua~~ js配置组件布局和外观
 - [ ] 使用~~lua~~ js脚本自定义组件
@@ -32,7 +34,10 @@
 - [ ] 对于youtube等平台支持拉取字幕显示
 - [ ] 自定义的bar背景图片
 - [ ] 全屏应用启动时退化为fps等性能检测
-- [ ] 日志功能 
+- [ ] 增加quickjs配置自定义样式
+- [ ] 接管alt+tab
+- [ ] 用js自定义组件
+- [ ] i18n
 
 #### 使用bilibili扩展加载桌面弹幕
 

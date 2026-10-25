@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::time::Duration;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -11,7 +10,6 @@ const POPUP_WIDTH: f32 = 360.;
 const POPUP_HEIGHT: f32 = 440.;
 const POPUP_X_MARGIN: f32 = 12.;
 const BAR_HEIGHT: f64 = 30.0;
-const MAX_ROWS: usize = 60;
 
 /// 切换端口弹窗：带防抖，已开则关闭
 pub fn toggle(cx: &mut App) {
@@ -79,7 +77,7 @@ fn open(cx: &mut App) {
 
 pub struct PortsPopup {
     ports: Entity<PortStore>,
-    names: HashMap<u32, String>,
+    names: Arc<HashMap<u32, String>>,
 }
 
 impl PortsPopup {
@@ -94,7 +92,7 @@ impl PortsPopup {
                     .await;
                 if this
                     .update(cx, |popup, cx| {
-                        popup.names = names;
+                        popup.names = Arc::new(names);
                         cx.notify();
                     })
                     .is_err()
@@ -109,7 +107,7 @@ impl PortsPopup {
         .detach();
         Self {
             ports,
-            names: HashMap::new(),
+            names: Arc::new(HashMap::new()),
         }
     }
 }
@@ -129,10 +127,10 @@ fn pid_names() -> HashMap<u32, String> {
 }
 
 impl Render for PortsPopup {
-    /// 渲染监听端口列表：端口、地址、进程名列，最多 MAX_ROWS 行
+    /// 渲染监听端口列表：端口、地址、进程名列，uniform_list 虚拟化滚动
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let entries = self.ports.read(cx).entries.clone();
-        let names = &self.names;
+        let entries = Arc::new(self.ports.read(cx).entries.clone());
+        let names = self.names.clone();
         let count = entries
             .iter()
             .map(|e| e.port)
@@ -179,18 +177,17 @@ impl Render for PortsPopup {
                     .child(header_cell("proc", "进程", 0.)),
             )
             .child(
-                div()
-                    .id("ports-list")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .overflow_hidden()
-                    .children(
-                        entries
-                            .into_iter()
-                            .take(MAX_ROWS)
-                            .map(|entry| port_row(entry, names)),
-                    ),
+                uniform_list(
+                    "ports-list",
+                    entries.len(),
+                    move |range, _window, _cx| {
+                        range
+                            .map(|ix| port_row(entries[ix].clone(), &names))
+                            .collect()
+                    },
+                )
+                .flex_1()
+                .w_full(),
             )
             .with_animation(
                 "ports-pop-in",
@@ -226,12 +223,12 @@ fn port_row(entry: PortEntry, names: &HashMap<u32, String>) -> impl IntoElement 
     };
     div()
         .id(format!("{}:{}:{}", entry.proto.as_str(), entry.port, entry.addr))
+        .w_full()
         .flex()
         .flex_row()
         .gap(px(8.))
         .items_center()
         .h(px(20.))
-        .px(px(4.))
         .rounded(px(4.))
         .hover(|style| style.bg(rgba(0xFFFFFF1E)))
         .child(
